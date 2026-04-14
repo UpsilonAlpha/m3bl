@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+Unified pipeline for protein/ligand preprocessing, MD, and QM/MM.
+"""
+
+from __future__ import annotations
+import argparse
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+# Import local workflows
+import preprocess
+import md
+import qmmm
+
+METALS = {
+    "ZN", #"MG","MN","FE","CO","NI","CU","CD","CA","NA","K","CS","RB","SR","BA"
+}
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="m3bl")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # =========================================================
+    # PREPROCESS
+    # =========================================================
+    p1 = subparsers.add_parser("preprocess", help="Prepare system")
+
+    p1.add_argument("input", help="Input PDB file")
+    p1.add_argument("--ligand", help="Ligand file (optional)")
+    p1.add_argument("--model", type=int, default=1, help="Autodock model (optional)")
+    p1.add_argument("--charge", type=int, default=0, help="Ligand charge (optional)")
+    p1.add_argument("--cutoff", type=float, default=2.6, help="Cutoff for coordinating atoms in angstroms")
+    p1.add_argument("--metals", nargs="+", default=["ZN"])
+    p1.add_argument("--skip-solvate", action="store_true")
+    p1.add_argument("--workdir", default="preprocess_results", help="Output directory")
+
+    # =========================================================
+    # MD
+    # =========================================================
+    p2 = subparsers.add_parser("md", help="Run molecular dynamics")
+
+    p2.add_argument("input", help="Input PDB file")
+    p2.add_argument("--preprocess", required=True, help="Preprocess JSON file")
+    p2.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
+    p2.add_argument("--temp", type=float, default=300)
+    p2.add_argument("--npt-timestep", type=float, default=0.001)
+    p2.add_argument("--nvt-timestep", type=float, default=0.004)
+    p2.add_argument("--nvt-time", type=float, default=500)
+    p2.add_argument("--skip-npt", action="store_true")
+    p2.add_argument("--skip-nvt", action="store_true")
+    p2.add_argument("--workdir", required=True, help="Output directory")
+
+    # =========================================================
+    # QMMM
+    # =========================================================
+    p3 = subparsers.add_parser("qmmm", help="Run QM/MM")
+
+    p3.add_argument("input", help="Input PDB file")
+    p3.add_argument("--preprocess", required=True, help="Preprocess JSON file")
+    p3.add_argument("--charge", type=int, required=True)
+    p3.add_argument("--mult", type=int, required=True)
+    p3.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
+    p3.add_argument("--method", default="GFN1")
+    p3.add_argument("--temp", type=float, default=300)
+    p3.add_argument("--timestep", type=float, default=0.001)
+    p3.add_argument("--time", type=float, default=10)
+    p3.add_argument("--workdir", required=True, help="Output directory")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # =========================================================
+    # DISPATCH
+    # =========================================================
+    if args.command == "preprocess":
+        result = preprocess.run(args)
+
+    elif args.command == "md":
+        result = md.run(args)
+
+    elif args.command == "qmmm":
+        result = qmmm.run(args)
+
+    else:
+        parser.error("Unknown command")
+
+    # =========================================================
+    # OUTPUT
+    # =========================================================
+    if isinstance(result, dict):
+        print("\n[RESULT]")
+        for k, v in result.items():
+            print(f"{k}: {v}")
+
+
+if __name__ == "__main__":
+    main()

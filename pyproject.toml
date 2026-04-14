@@ -1,0 +1,17 @@
+[project]
+name = "M3BL"
+version = "0.1.0"
+description = "MBL MD/QMMM pipeline"
+authors = [{name = "Your Name"}]
+dependencies = [
+    "numpy",
+    "rdkit",
+    "openmm",
+]
+
+[project.scripts]
+pipeline = "pipeline.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
