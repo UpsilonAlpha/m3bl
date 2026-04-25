@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict, Any, Tuple
+from openmm.app import PDBFile
+
+from preprocess import (
+    save_result,
+    load_section,
+)
 
 from ash import (
     Fragment,
@@ -23,7 +29,6 @@ from ash import (
     OpenMM_MD,
 )
 
-from preprocess import onechain
 
 # ==============================
 # Constants
@@ -44,33 +49,53 @@ AMINO_ACIDS = {
 DEFAULT_FORCEFIELDS = [
     "amber14/protein.ff14SB.xml",
     "amber14/tip3p.xml",
-    "openff_LIG.xml",
+    #"openff_LIG.xml",
 ]
 
 # ==============================
 # QM Region Builder
 # ==============================
 
-def build_qm_region(mm: OpenMMTheory, target_residues: List[int]):
-    """Construct QM atom list and boundary exclusions."""
 
-    qm_atoms: Set[int] = set()
-    boundary_excluded: Set[int] = set()
 
-    for res in mm.topology.residues():
-        if int(res.id) in target_residues:
-            print(f"[QM] Including residue {res.name} {res.id}")
+def build_qm_region(
+    pdb_file: str,
+    qm_residue_dict: Dict[str, Dict[int, str]],
+    backbone_atoms=BACKBONE_ATOMS,
+    amino_acids=AMINO_ACIDS,
+):
+    pdb = PDBFile(pdb_file)
+    topology = pdb.topology
+
+    qm_residue_dict = {
+        chain: {str(k): v for k, v in residues.items()}
+        for chain, residues in qm_residue_dict.items()
+    }
+
+    qm_atoms = set()
+    boundary_excluded = set()
+
+    print("\n===== QM Region Construction =====")
+
+    for res in topology.residues():
+        chain = res.chain.id
+        resid = res.id.strip()   # ← FIXED
+
+        if chain in qm_residue_dict and resid in qm_residue_dict[chain]:
+            print(f"[QM] Including residue {res.name} {chain}:{resid}")
 
             for atom in res.atoms():
-                if atom.name not in BACKBONE_ATOMS:
+                if atom.name not in backbone_atoms:
                     qm_atoms.add(atom.index)
 
-                if res.name not in AMINO_ACIDS:
+                if res.name not in amino_acids:
+                    qm_atoms.add(atom.index)
                     boundary_excluded.add(atom.index)
 
-    print(f"[INFO] QM atoms: {len(qm_atoms)}")
-    return sorted(qm_atoms), sorted(boundary_excluded)
+    print(f"\n[INFO] QM atoms: {len(qm_atoms)}")
+    print(f"[INFO] Boundary excluded atoms: {len(boundary_excluded)}")
 
+    return sorted(qm_atoms), sorted(boundary_excluded)
 
 # ==============================
 # Pipeline
@@ -78,38 +103,33 @@ def build_qm_region(mm: OpenMMTheory, target_residues: List[int]):
 
 def run(args) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
-    workdir = Path(args.workdir).resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
 
-    #print("[STEP] Generating onechain structure...")
-    #target_residues = onechain(args.input)
+    preprocess = load_section(args.input, "preprocess")
+    md = load_section(args.input, "md")
 
-    with open(workdir / "preprocess" / "preprocess.json") as f:
-        data = json.load(f)
 
-    qm_residues = data["results"].get("qm_residues")
-    result["qm_residues"] = qm_residues
+    pdbfile = md["results"]["lastframe"]
+    qm_residues = preprocess["results"].get("qm_residues")
+    print(qm_residues)
 
     print("[STEP] Building MM system...")
     mm = OpenMMTheory(
         xmlfiles=DEFAULT_FORCEFIELDS,
-        pdbfile=args.input,
+        pdbfile=pdbfile,
         autoconstraints=None,
         periodic=True,
         rigidwater=True,
     )
-    result["mm"] = mm
 
-    fragment = Fragment(pdbfile=args.input)
-    result["fragment"] = fragment
+    fragment = Fragment(pdbfile=pdbfile)
 
     print("[STEP] Building QM region...")
-    qm_atoms, boundary_excluded = build_qm_region(mm, target_residues)
+    qm_atoms, boundary_excluded = build_qm_region(pdbfile, qm_residues)
     result["qm_atoms"] = qm_atoms
     result["boundary_excluded"] = boundary_excluded
 
     print("[STEP] Initializing QM/MM...")
-    xtb = xTBTheory(xtbmethod=args.method, numcores=cores)
+    xtb = xTBTheory(xtbmethod=args.method, numcores=args.cores)
     qmmm = QMMMTheory(
         qm_theory=xtb,
         mm_theory=mm,
@@ -119,7 +139,6 @@ def run(args) -> Dict[str, Any]:
         embedding="electrostatic",
         printlevel=1,
     )
-    result["qmmm"] = qmmm
 
     print("[STEP] Running QM/MM MD...")
     OpenMM_MD(
@@ -136,42 +155,8 @@ def run(args) -> Dict[str, Any]:
         mult=args.mult,
     )
 
-    result["trajfile"] = "QM_MM.dcd"
+    result["trajfile"] = Path("QM_MM.dcd").resolve()
     
-    save_run(result, args, "qmmm_results.json")
+    save_results(result, args, filename="../results.json", section="qmmm")
     print("[DONE] QM/MM workflow complete")
     return result
-
-
-# ==============================
-# CLI
-# ==============================
-
-def add_arguments():
-    parser = argparse.ArgumentParser(description="QM/MM xTB workflow")
-
-    parser.add_argument("input", help="Input PDB")
-
-    parser.add_argument("--charge", type=int, default=2)
-    parser.add_argument("--mult", type=int, default=2)
-
-    parser.add_argument("--method", default="GFN1")
-
-    parser.add_argument("--temp", type=float, default=300)
-    parser.add_argument("--timestep", type=float, default=0.001)
-    parser.add_argument("--time", type=float, default=10)
-    return parser
-
-
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-    result = run(args)
-
-    print("\n=== RESULT ===")
-    for k, v in result.items():
-        print(f"{k}: {v}")
-
-
-if __name__ == "__main__":
-    main()

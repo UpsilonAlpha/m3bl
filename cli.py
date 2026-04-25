@@ -35,15 +35,15 @@ def build_parser():
     p1.add_argument("--cutoff", type=float, default=2.6, help="Cutoff for coordinating atoms in angstroms")
     p1.add_argument("--metals", nargs="+", default=["ZN"])
     p1.add_argument("--skip-solvate", action="store_true")
-    p1.add_argument("--workdir", default="preprocess_results", help="Output directory")
+    p1.add_argument("--implicit", action="store_true")
+    
 
     # =========================================================
     # MD
     # =========================================================
     p2 = subparsers.add_parser("md", help="Run molecular dynamics")
 
-    p2.add_argument("input", help="Input PDB file")
-    p2.add_argument("--preprocess", required=True, help="Preprocess JSON file")
+    p2.add_argument("input", help="Input preprocess_results file")
     p2.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
     p2.add_argument("--temp", type=float, default=300)
     p2.add_argument("--npt-timestep", type=float, default=0.001)
@@ -51,15 +51,15 @@ def build_parser():
     p2.add_argument("--nvt-time", type=float, default=500)
     p2.add_argument("--skip-npt", action="store_true")
     p2.add_argument("--skip-nvt", action="store_true")
-    p2.add_argument("--workdir", required=True, help="Output directory")
+    p2.add_argument("--implicit", action="store_true")
+
 
     # =========================================================
     # QMMM
     # =========================================================
     p3 = subparsers.add_parser("qmmm", help="Run QM/MM")
 
-    p3.add_argument("input", help="Input PDB file")
-    p3.add_argument("--preprocess", required=True, help="Preprocess JSON file")
+    p3.add_argument("input", help="Input JSON file")
     p3.add_argument("--charge", type=int, required=True)
     p3.add_argument("--mult", type=int, required=True)
     p3.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
@@ -67,7 +67,6 @@ def build_parser():
     p3.add_argument("--temp", type=float, default=300)
     p3.add_argument("--timestep", type=float, default=0.001)
     p3.add_argument("--time", type=float, default=10)
-    p3.add_argument("--workdir", required=True, help="Output directory")
 
     return parser
 

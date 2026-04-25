@@ -11,8 +11,12 @@ Features:
 from __future__ import annotations
 import argparse
 import os
+import json
 from pathlib import Path
 from typing import Any, Dict
+
+from openmm import XmlSerializer
+from openmm.app import PDBFile, Topology, ForceField
 
 from ash import (
     OpenMMTheory,
@@ -20,13 +24,12 @@ from ash import (
     OpenMM_Opt,
     OpenMM_box_equilibration,
     OpenMM_MD,
-    MDtraj_imagetraj,
+    MDtraj_imagetraj
 )
 
 from preprocess import (
-    save_run,
-    merge_ligand,
-    find_coordinators,
+    save_result,
+    load_section,
 )
 
 
@@ -40,30 +43,54 @@ DEFAULT_FORCEFIELDS = [
     "openff_LIG.xml",
 ]
 
+
 # ==============================
 # Unified run() function
 # ==============================
 
 def run(args) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
-    workdir = Path(args.workdir).resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
 
-    with open(workdir / "preprocess" / "preprocess.json") as f:
-        data = json.load(f)
+    preprocess = load_section(args.input, "preprocess")
     
-    constraints = data["results"]["constraints"]
+    constraints = preprocess["results"]["constraints"]
+    pdb_file = preprocess["results"]["final_pdb"]
 
-    mm = OpenMMTheory(
-        xmlfiles=DEFAULT_FORCEFIELDS,
-        pdbfile=args.input,
-        periodic=True,
-        numcores=cores,
-        autoconstraints='HBonds',
-        constraints=constraints,
-        rigidwater=True,
-    )
-    result["mm"] = mm
+    if args.implicit:
+
+        pdb = PDBFile(pdb_file)
+        topology = pdb.topology
+        forcefield = ForceField("amber14/protein.ff14SB.xml", "amber14/tip3p.xml", "implicit/gbn2.xml", "openff_LIG.xml")
+
+        system = forcefield.createSystem(topology, soluteDielectric=1.0, solventDielectric=78.5)
+
+        # Assuming 'system' is your OpenMM System object
+        with open('system.xml', 'w') as output:
+            output.write(XmlSerializer.serialize(system))
+
+        mm = OpenMMTheory(
+            xmlsystemfile='system.xml',
+            pdbfile=pdb_file,
+            periodic=False,
+            numcores=args.cores,
+            autoconstraints='HBonds',
+            constraints=constraints,
+            nonbondedMethod_noPBC='CutoffNonPeriodic',
+            nonbonded_cutoff_noPBC=20,
+        )
+
+    else:
+        mm = OpenMMTheory(
+            xmlfiles=DEFAULT_FORCEFIELDS,
+            pdbfile=pdb_file,
+            periodic=True,
+            numcores=args.cores,
+            autoconstraints='HBonds',
+            constraints=constraints,
+            rigidwater=True,
+        )
+
+    fragment = Fragment(pdbfile=pdb_file)
 
     print("[STEP] Minimization...")
     OpenMM_Opt(fragment=fragment, theory=mm, maxiter=500, tolerance=1)
@@ -108,40 +135,9 @@ def run(args) -> Dict[str, Any]:
             format='DCD',
         )
 
-    result["trajfile"] = "NVTtrajectory.dcd"
-    result["lastframe"] = "NVTtrajectory_lastframe.pdb"
+    result["trajfile"] = Path("NVTtrajectory.dcd").resolve()
+    result["lastframe"] = Path("NVTtrajectory_lastframe.pdb").resolve()
 
     print("[DONE] Workflow complete")
-    save_run(result, args, "md_results.json")
+    save_results(result, args,  filename="../results.json", section="md")
     return result
-
-
-# ==============================
-# CLI
-# ==============================
-
-def add_arguments() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="MD workflow with checkpointing")
-
-    parser.add_argument("input", help="Input protein PDB")
-
-    parser.add_argument("--temp", type=float, default=300)
-    parser.add_argument("--npt-timestep", type=float, default=0.001)
-    parser.add_argument("--nvt-timestep", type=float, default=0.004)
-    parser.add_argument("--nvt-time", type=float, default=500)
-
-    # checkpoint / control
-    parser.add_argument("--skip-npt", action="store_true")
-    parser.add_argument("--skip-nvt", action="store_true")
-
-    return parser
-
-
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-    run(args)
-
-
-if __name__ == "__main__":
-    main()

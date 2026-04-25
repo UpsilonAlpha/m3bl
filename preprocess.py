@@ -8,9 +8,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 from typing import Dict, Any
 from pathlib import Path
 from datetime import datetime
+
 
 import numpy as np
 from rdkit import Chem
@@ -32,7 +34,7 @@ RESIDUE_VARIANTS = {}
 
 
 METALS = {
-    "ZN", "MG",#"MN","FE","CO","NI","CU","CD","CA","NA","K","CS","RB","SR","BA"
+    "ZN",# "MG","MN","FE","CO","NI","CU","CD","CA","NA","K","CS","RB","SR","BA"
 }
 
 BACKBONE_ATOMS = {
@@ -58,7 +60,44 @@ DONOR_ATOMS = {
 # ==============================
 # Utility
 # ==============================
-def save_run(result: Dict[str, Any], args, filename: str = "results.json") -> str:
+
+
+def save_result(
+    result: Dict[str, Any],
+    args,
+    filename: str = "results.json",
+    section: str = None,
+) -> str:
+    """
+    Clean, merge, and save results into a shared JSON file.
+
+    - Removes non-serializable objects
+    - Stores inputs + metadata
+    - Merges into existing JSON (no overwrite)
+    - Supports sectioned pipeline output (preprocess/md/qmmm)
+
+    Parameters
+    ----------
+    result : dict
+        Output from run()
+    args : argparse.Namespace
+        CLI arguments
+    filename : str
+        JSON file path
+    section : str
+        Section name (e.g. "preprocess", "md", "qmmm")
+
+    Returns
+    -------
+    str
+        Path to JSON file
+    """
+
+    path = Path(filename)
+
+    # ==============================
+    # 1. Clean result (JSON-safe)
+    # ==============================
     clean_result = {}
 
     for k, v in result.items():
@@ -67,32 +106,69 @@ def save_run(result: Dict[str, Any], args, filename: str = "results.json") -> st
         elif isinstance(v, (list, dict)):
             clean_result[k] = v
         else:
-            # Skip non-serializable objects (e.g. Fragment)
+            # Skip non-serializable objects (Fragment, OpenMMTheory, etc.)
             continue
 
+    # ==============================
+    # 2. Serialize args
+    # ==============================
     args_dict = vars(args).copy()
 
-    # Normalize metals (ensure uppercase)
-    if "metals" in args_dict:
+    if "metals" in args_dict and args_dict["metals"] is not None:
         args_dict["metals"] = [m.upper() for m in args_dict["metals"]]
 
-    metadata = {
-        "timestamp": datetime.now().isoformat(),
-        "mode": getattr(args, "mode", "unknown"),
-    }
-
-    output = {
+    # ==============================
+    # 3. Build payload
+    # ==============================
+    payload = {
         "inputs": args_dict,
         "results": clean_result,
-        "metadata": metadata,
+        "metadata": {
+            "timestamp": datetime.now().isoformat(),
+            "mode": getattr(args, "mode", None),
+            "command": getattr(args, "command", None),
+        },
     }
 
-    with open(filename, "w") as f:
-        json.dump(output, f, indent=2)
+    # ==============================
+    # 4. Load existing JSON
+    # ==============================
+    if path.exists():
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = {}
+    else:
+        data = {}
 
-    print(f"[INFO] Results written to {filename}")
-    return str(filename)
+    # ==============================
+    # 5. Merge into section
+    # ==============================
+    if section:
+        data.setdefault(section, {})
+        data[section].update(payload)
+    else:
+        data.update(payload)
 
+    # ==============================
+    # 6. Atomic write
+    # ==============================
+    tmp_path = path.with_suffix(".tmp")
+
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    tmp_path.replace(path)
+
+    print(f"[INFO] Results updated → {path}")
+    return str(path)
+
+
+def load_section(filename: str, section: str) -> Dict[str, Any]:
+    with open(filename, "r") as f:
+        data = json.load(f)
+    return data.get(section, {})
 
 # ==============================
 # Ligand Preparation
@@ -136,196 +212,27 @@ def merge_ligand(protein_pdb: str, ligand_file: str, model: int = 1, charge: int
 
         Chem.MolToMolFile(mol, "ligand.mol")
 
+        small_molecule_parameterizer(
+            forcefield_option="OpenFF",
+            molfile="ligand.mol",
+            charge=charge,
+        )
 
-    small_molecule_parameterizer(
-        forcefield_option="OpenFF",
-        molfile="ligand.mol",
-        charge=charge,
-    )
+        merge_pdb_files(protein_pdb, "LIG.pdb")
+        return "merged.pdb"
 
-    merge_pdb_files(protein_pdb, "LIG.pdb")
+    elif ligand_file.endswith(".pdb"):
+        mol = Chem.MolFromPDBFile(ligand_file)
+        mol = Chem.AddHs(mol, addCoords=True)
+        Chem.MolToMolFile(mol, "ligand.mol")
 
-    return "merged.pdb"
+        
+        small_molecule_parameterizer( forcefield_option="OpenFF", molfile="ligand.mol", charge=charge)
 
+        return protein_pdb
 
-# ==============================
-# One-chain conversion
-# ==============================
-
-def dep_onechain(input_pdb: str, output_pdb: str = "onechain.pdb") -> str:
-    with open(input_pdb) as f:
-        lines = f.readlines()
-
-    cryst1 = [l for l in lines if l.startswith("CRYST1")]
-    conect = [l for l in lines if l.startswith("CONECT")]
-    serials = [int(l[6:11]) for l in lines if l.startswith(("ATOM", "HETATM"))]
-
-    pdb = PDBFile(input_pdb)
-    positions = pdb.positions
-
-    new_top = Topology()
-    chainA = new_top.addChain("A")
-
-    atom_map = {}
-    res_counter = 1
-
-    for chain in pdb.topology.chains():
-        for res in sorted(chain.residues(), key=lambda r: r.index):
-            new_res = new_top.addResidue(res.name, chainA, id=str(res_counter))
-            res_counter += 1
-
-            for atom in res.atoms():
-                atom_map[atom] = new_top.addAtom(atom.name, atom.element, new_res)
-
-    for bond in pdb.topology.bonds():
-        new_top.addBond(atom_map[bond[0]], atom_map[bond[1]])
-
-    protein_res = [r for r in chainA.residues() if r.name in AMINO_ACIDS]
-    last_protein = protein_res[-1]
-
-    het_counter = int(last_protein.id) + 1
-    for r in chainA.residues():
-        if r.name not in AMINO_ACIDS:
-            r.id = str(het_counter)
-            het_counter += 1
-
-    serial_idx = 0
-    last_serial = None
-
-    with open(output_pdb, "w") as f:
-        f.writelines(cryst1)
-
-        for res in chainA.residues():
-            for atom in res.atoms():
-                pos = positions[atom.index]
-                serial = serials[serial_idx]
-                last_serial = serial
-                serial_idx += 1
-
-                record = "HETATM" if res.name not in AMINO_ACIDS else "ATOM  "
-
-                f.write(
-                    f"{record}{serial:>5} {atom.name:<4} {res.name:>3} A{res.id:>4}   "
-                    f"{pos.x*10:8.3f}{pos.y*10:8.3f}{pos.z*10:8.3f}\n"
-                )
-
-            if res == last_protein:
-                f.write(f"TER   {last_serial+1:>5}      {res.name:<3} A{res.id:>4}\n")
-                last_serial += 1
-
-        f.write(f"TER   {last_serial+1:>5}      {res.name:<3} A{res.id:>4}\n")
-        f.writelines(conect)
-        f.write("END\n")
-
-    return find_coordinators(output_pdb, metals=METALS)
-
-def onechain(input_pdb: str, output_pdb: str = "onechain.pdb"):
-    from openmm.app import PDBFile, Topology
-
-    # -----------------------------
-    # Read original file (metadata)
-    # -----------------------------
-    with open(input_pdb) as f:
-        lines = f.readlines()
-
-    cryst1_lines = [l for l in lines if l.startswith("CRYST1")]
-    conect_lines = [l for l in lines if l.startswith("CONECT")]
-
-    # -----------------------------
-    # Load with OpenMM
-    # -----------------------------
-    pdb = PDBFile(input_pdb)
-    positions = pdb.positions
-
-    new_top = Topology()
-    chainA = new_top.addChain("A")
-
-    atom_map = {}
-    res_counter = 1
-
-    # -----------------------------
-    # Rebuild topology (single chain)
-    # -----------------------------
-    for chain in pdb.topology.chains():
-        for res in sorted(chain.residues(), key=lambda r: r.index):
-            new_res = new_top.addResidue(res.name, chainA, id=str(res_counter))
-            res_counter += 1
-
-            for atom in res.atoms():
-                new_atom = new_top.addAtom(atom.name, atom.element, new_res)
-                atom_map[atom] = new_atom
-
-    # Copy bonds (not written, but keeps consistency if needed later)
-    for bond in pdb.topology.bonds():
-        new_top.addBond(atom_map[bond[0]], atom_map[bond[1]])
-
-    # -----------------------------
-    # Identify protein residues
-    # -----------------------------
-    protein_residues = [r for r in chainA.residues() if r.name in AMINO_ACIDS]
-    last_protein = protein_residues[-1]
-
-    # -----------------------------
-    # Renumber HETATM residues
-    # -----------------------------
-    het_counter = int(last_protein.id) + 1
-    for r in chainA.residues():
-        if r.name not in AMINO_ACIDS:
-            r.id = str(het_counter)
-            het_counter += 1
-
-    # -----------------------------
-    # Write PDB
-    # -----------------------------
-    serial = 1
-    last_res = None
-
-    with open(output_pdb, "w") as f:
-        # Preserve CRYST1
-        for line in cryst1_lines:
-            f.write(line)
-
-        for res in chainA.residues():
-            last_res = res
-
-            for atom in res.atoms():
-                pos = positions[atom.index]
-
-                record = "HETATM" if res.name not in AMINO_ACIDS else "ATOM  "
-
-                f.write(
-                    f"{record}{serial:>5} {atom.name:<4} {res.name:>3} A{res.id:>4}   "
-                    f"{pos.x*10:8.3f}{pos.y*10:8.3f}{pos.z*10:8.3f}\n"
-                )
-                serial += 1
-
-            # TER after protein block
-            if res == last_protein:
-                f.write(
-                    f"TER   {serial:>5}      {res.name:<3} A{res.id:>4}\n"
-                )
-                serial += 1
-
-        # FINAL TER (important for downstream tools)
-        if last_res is not None:
-            f.write(
-                f"TER   {serial:>5}      {last_res.name:<3} A{last_res.id:>4}\n"
-            )
-            serial += 1
-
-        # Preserve CONECT exactly
-        for line in conect_lines:
-            f.write(line)
-
-        f.write("END\n")
-
-    print(f"[INFO] Wrote {output_pdb}")
-
-    # -----------------------------
-    # Return coordinators
-    # -----------------------------
-    return find_coordinators(output_pdb, metals=METALS)
-
+    else:
+        print("Not a valid file format for ligand: Choose either .pdbqt or .mol")
     
 # ==============================
 # Coordination
@@ -363,16 +270,12 @@ def find_coordinators(
 
     for m in metal_idx:
         print(f"\nMetal {elems[m]} at {chains[m]}:{resids[m]} (atom index {m})")
+        qm_residue_dict.setdefault(chains[m], {})[resids[m]] = resnames[m]
 
         residue_min_dist = {}
 
         for i in range(len(atoms)):
             if i == m:
-                continue
-
-            # skip other metals
-            if elems[i].upper() in metals:
-                boundary_excluded.add(i)
                 continue
 
             # donor atom filter
@@ -407,33 +310,14 @@ def find_coordinators(
 
             # Build QM atoms (all non-backbone atoms of residue)
             for res in topology.residues():
-                if (
-                    res.chain.id == chain
-                    and int(res.id) == resid
-                ):
-
+                if (res.chain.id == chain and int(res.id) == resid):
                     qm_residue_dict.setdefault(chain, {})[resid] = resn
 
-                    for a in res.atoms():
-                        if a.name not in BACKBONE_ATOMS:
-                            qm_atoms.add(a.index)
+    return qm_residue_dict, bondconstraints
 
-                        # non-protein → exclude from boundary creation
-                        if res.name not in AMINO_ACIDS:
-                            boundary_excluded.add(a.index)
 
-            # Also constrain metal–ligand bond
-            boundary_excluded.add(m)
 
-    # Convert to sorted lists
-    qm_atoms = sorted(qm_atoms)
-    boundary_excluded = sorted(boundary_excluded)
 
-    return qm_residue_dict, bondconstraints, qm_atoms, boundary_excluded
-
-# ==============================
-# PIPELINE ENTRY
-# ==============================
 
 def run(args) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
@@ -444,43 +328,56 @@ def run(args) -> Dict[str, Any]:
         print("[STEP] Preparing ligand...")
         pdb_file = merge_ligand(args.input, args.ligand, args.model, args.charge)
         extraxmlfile = "openff_LIG.xml"
+        result["ligand_xml"] = Path(extraxmlfile).resolve()
     else:
         pdb_file = args.input
-        extraxmlfile = None
-    result["merged_pdb"] = pdb_file
+
+    result["merged_pdb"] = Path(pdb_file).resolve()
 
 
     if not args.skip_solvate:
         print("[STEP] Solvating system...")
-        modeller, fragment = OpenMM_Modeller(
-            pdbfile=pdb_file,
-            forcefield="Amber14",
-            watermodel="tip3p",
-            pH=8.0,
-            solvent_padding=10.0,
-            ionicstrength=0.1,
-            pos_iontype='Na+',
-            neg_iontype='Cl-',
-            residue_variants=RESIDUE_VARIANTS,
-            use_higher_occupancy=True,
-            extraxmlfile=extraxmlfile,
-        )
-        pdb_file = "finalsystem.pdb"
+        if args.implicit:
+            modeller, fragment = OpenMM_Modeller(
+                pdbfile=pdb_file,
+                implicit=True,
+                forcefield="Amber14",
+                implicit_solvent_xmlfile="implicit/gbn2.xml",
+                residue_variants=RESIDUE_VARIANTS,
+                use_higher_occupancy=True,
+                extraxmlfile=extraxmlfile,
+            )
+        else:
+            modeller, fragment = OpenMM_Modeller(
+                pdbfile=pdb_file,
+                forcefield="Amber14",
+                watermodel="tip3p",
+                pH=8.0,
+                solvent_padding=10.0,
+                ionicstrength=0.1,
+                pos_iontype='Na+',
+                neg_iontype='Cl-',
+                residue_variants=RESIDUE_VARIANTS,
+                use_higher_occupancy=True,
+                extraxmlfile=extraxmlfile,
+            )
+        
+        pdb_file = Path("finalsystem.pdb").resolve()
+            
     else:
         pdb_file = args.input
-        fragment = Fragment(pdbfile=args.input)
 
-    result["solvated_pdb"] = pdb_file
-    result["fragment"] = fragment
+    result["final_pdb"] = Path(pdb_file).resolve()
+
 
 
     print("[STEP] Detecting coordination constraints...")
-    qm_residues, constraints, qm_atoms, boundary_excluded_atoms = find_coordinators(pdb_file)
+    qm_residues, constraints = find_coordinators(pdb_file, args.cutoff, metals=metals)
     result["qm_residues"] = qm_residues
     result["constraints"] = constraints
-    result["qm_atoms"] = qm_atoms
-    result["boundary_excluded_atoms"] = boundary_excluded_atoms
 
-    save_run(result, args, "preprocess_results")
+    
+    save_result(result, args, filename="../results.json", section="preprocess")
+    
 
     return result
