@@ -328,11 +328,13 @@ def run(args) -> Dict[str, Any]:
         print("[STEP] Preparing ligand...")
         pdb_file = merge_ligand(args.input, args.ligand, args.model, args.charge)
         extraxmlfile = "openff_LIG.xml"
-        result["ligand_xml"] = Path(extraxmlfile).resolve()
+        result["ligand_xml"] = Path(extraxmlfile).resolve().as_posix()
     else:
+        extraxmlfile=None
+        result["ligand_xml"] = False
         pdb_file = args.input
 
-    result["merged_pdb"] = Path(pdb_file).resolve()
+    result["merged_pdb"] = Path(pdb_file).resolve().as_posix()
 
 
     if not args.skip_solvate:
@@ -362,12 +364,12 @@ def run(args) -> Dict[str, Any]:
                 extraxmlfile=extraxmlfile,
             )
         
-        pdb_file = Path("finalsystem.pdb").resolve()
+        pdb_file = Path("finalsystem.pdb").resolve().as_posix()
             
     else:
         pdb_file = args.input
 
-    result["final_pdb"] = Path(pdb_file).resolve()
+    result["processed_pdb"] = Path(pdb_file).resolve().as_posix()
 
 
 

@@ -18,14 +18,7 @@ from typing import Any, Dict
 from openmm import XmlSerializer
 from openmm.app import PDBFile, Topology, ForceField
 
-from ash import (
-    OpenMMTheory,
-    Fragment,
-    OpenMM_Opt,
-    OpenMM_box_equilibration,
-    OpenMM_MD,
-    MDtraj_imagetraj
-)
+from ash import *
 
 from preprocess import (
     save_result,
@@ -36,12 +29,6 @@ from preprocess import (
 # ==============================
 # Defaults
 # ==============================
-
-DEFAULT_FORCEFIELDS = [
-    "amber14/protein.ff14SB.xml",
-    "amber14/tip3p.xml",
-    "openff_LIG.xml",
-]
 
 
 # ==============================
@@ -54,22 +41,30 @@ def run(args) -> Dict[str, Any]:
     preprocess = load_section(args.input, "preprocess")
     
     constraints = preprocess["results"]["constraints"]
-    pdb_file = preprocess["results"]["final_pdb"]
+    pdb_file = preprocess["results"]["processed_pdb"]
+    ligand_forcefield = preprocess["results"]["ligand_xml"]
+
+    default_forcefields = [
+        "amber14/protein.ff14SB.xml",
+        "amber14/tip3p.xml",
+    ]
+
+    if ligand_forcefield:
+        default_forcefields.append(ligand_forcefield)
 
     if args.implicit:
-
+        default_forcefields.append("implicit/gbn2.xml")
         pdb = PDBFile(pdb_file)
         topology = pdb.topology
-        forcefield = ForceField("amber14/protein.ff14SB.xml", "amber14/tip3p.xml", "implicit/gbn2.xml", "openff_LIG.xml")
-
-        system = forcefield.createSystem(topology, soluteDielectric=1.0, solventDielectric=78.5)
+        forcefield = ForceField(*default_forcefields)
+        system = forcefield.createSystem(topology, soluteDielectric=1.0, solventDielectric=40)
 
         # Assuming 'system' is your OpenMM System object
         with open('system.xml', 'w') as output:
             output.write(XmlSerializer.serialize(system))
 
         mm = OpenMMTheory(
-            xmlsystemfile='system.xml',
+            xmlsystemfile="system.xml",
             pdbfile=pdb_file,
             periodic=False,
             numcores=args.cores,
@@ -81,7 +76,7 @@ def run(args) -> Dict[str, Any]:
 
     else:
         mm = OpenMMTheory(
-            xmlfiles=DEFAULT_FORCEFIELDS,
+            xmlfiles=default_forcefields,
             pdbfile=pdb_file,
             periodic=True,
             numcores=args.cores,
@@ -94,7 +89,14 @@ def run(args) -> Dict[str, Any]:
 
     print("[STEP] Minimization...")
     OpenMM_Opt(fragment=fragment, theory=mm, maxiter=500, tolerance=1)
-        
+    result["minimized"] = Path("frag-minimized.pdb").resolve().as_posix()
+
+    if args.gentle:
+        Gentle_warm_up_MD(theory=mm, fragment=fragment, time_steps=[0.0005,0.001,0.004],
+                    steps=[10,50,10000], temperatures=[1,10,300])
+        result["gentle"] = Path("warmup_MD_cycle3_lastframe.pdb").resolve().as_posix()
+        fragment = Fragment(pdbfile=result["gentle"])
+
     if not args.skip_npt:
         print("[STEP] NPT Equilibration...")
         OpenMM_box_equilibration(
@@ -135,9 +137,9 @@ def run(args) -> Dict[str, Any]:
             format='DCD',
         )
 
-    result["trajfile"] = Path("NVTtrajectory.dcd").resolve()
-    result["lastframe"] = Path("NVTtrajectory_lastframe.pdb").resolve()
+        result["trajfile"] = Path("NVTtrajectory.dcd").resolve().as_posix()
+        result["lastframe"] = Path("NVTtrajectory_lastframe.pdb").resolve().as_posix()
 
     print("[DONE] Workflow complete")
-    save_results(result, args,  filename="../results.json", section="md")
+    save_result(result, args,  filename="../results.json", section="md")
     return result

@@ -2,7 +2,7 @@
 name = "M3BL"
 version = "0.1.0"
 description = "MBL MD/QMMM pipeline"
-authors = [{name = "Your Name"}]
+authors = [{name = "Upsilon"}]
 dependencies = [
     "numpy",
     "rdkit",

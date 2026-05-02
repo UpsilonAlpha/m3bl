@@ -21,13 +21,7 @@ from preprocess import (
     load_section,
 )
 
-from ash import (
-    Fragment,
-    OpenMMTheory,
-    QMMMTheory,
-    xTBTheory,
-    OpenMM_MD,
-)
+from ash import *
 
 
 # ==============================
@@ -118,7 +112,7 @@ def run(args) -> Dict[str, Any]:
         pdbfile=pdbfile,
         autoconstraints=None,
         periodic=True,
-        rigidwater=True,
+        rigidwater=False,
     )
 
     fragment = Fragment(pdbfile=pdbfile)
@@ -128,35 +122,63 @@ def run(args) -> Dict[str, Any]:
     result["qm_atoms"] = qm_atoms
     result["boundary_excluded"] = boundary_excluded
 
-    print("[STEP] Initializing QM/MM...")
-    xtb = xTBTheory(xtbmethod=args.method, numcores=args.cores)
-    qmmm = QMMMTheory(
-        qm_theory=xtb,
-        mm_theory=mm,
-        fragment=fragment,
-        qmatoms=qm_atoms,
-        excludeboundaryatomlist=boundary_excluded,
-        embedding="electrostatic",
-        printlevel=1,
-    )
+    if args.interface == "xtb":
+        print("[STEP] Initializing QM/MM...")
+        xtb = xTBTheory(xtbmethod="GFN1", numcores=args.cores)
+        qmmm = QMMMTheory(
+            qm_theory=xtb,
+            mm_theory=mm,
+            fragment=fragment,
+            qmatoms=qm_atoms,
+            excludeboundaryatomlist=boundary_excluded,
+            embedding="electrostatic",
+            printlevel=1,
+        )
 
-    print("[STEP] Running QM/MM MD...")
-    OpenMM_MD(
-        fragment=fragment,
-        theory=qmmm,
-        timestep=args.timestep,
-        simulation_time=args.time,
-        traj_frequency=50,
-        temperature=args.temp,
-        integrator='LangevinMiddleIntegrator',
-        trajfilename="QM_MM",
-        coupling_frequency=1,
-        charge=args.charge,
-        mult=args.mult,
-    )
+        print("[STEP] Running QM/MM MD...")
+        OpenMM_MD(
+            fragment=fragment,
+            theory=qmmm,
+            timestep=args.timestep,
+            simulation_time=args.time,
+            traj_frequency=50,
+            temperature=args.temp,
+            integrator='LangevinMiddleIntegrator',
+            trajfilename="QM_MM",
+            coupling_frequency=1,
+            charge=args.charge,
+            mult=args.mult,
+        )
 
-    result["trajfile"] = Path("QM_MM.dcd").resolve()
-    
-    save_results(result, args, filename="../results.json", section="qmmm")
-    print("[DONE] QM/MM workflow complete")
+        result["trajfile"] = Path("QM_MM.dcd").resolve().as_posix()
+        result["lastframe"] = Path("QM_MM_lastframe.pdb").resolve().as_posix()
+        save_results(result, args, filename="../results.json", section="qmmm")
+
+    if args.interface == "pyscf":
+        pyscf = PySCFTheory(scf_type="RKS", functional="wb97x-v", basis="def2-svp", solvation="ddCOSMO", solvation_eps=78)
+
+        qmmm = QMMMTheory(
+            qm_theory=pyscf,
+            mm_theory=mm,
+            fragment=fragment,
+            qmatoms=qm_atoms,
+            excludeboundaryatomlist=boundary_excluded,
+            embedding="electrostatic",
+            printlevel=1,
+        )
+
+        if args.actradius != 0:
+            actregiondefine(mmtheory=mm, fragment=fragment, radius=args.actradius, originatom=boundary_excluded[0])
+            actatoms = read_intlist_from_file("active_atoms")
+        else:
+            actatoms=qm_atoms
+
+
+        waterconlist = getwaterconstraintslist(openmmtheoryobject=mm, atomlist=actatoms, watermodel='tip3p')
+        waterconstraints = {'bond': waterconlist}
+
+
+        Optimizer(fragment=fragment, theory=qmmm, ActiveRegion=True, actatoms=actatoms, maxiter=200,
+            constraints=waterconstraints, charge=args.charge, mult=args.mult)
+
     return result

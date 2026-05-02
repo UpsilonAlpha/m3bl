@@ -13,6 +13,7 @@ from typing import Any, Dict
 import preprocess
 import md
 import qmmm
+import postprocess
 
 METALS = {
     "ZN", #"MG","MN","FE","CO","NI","CU","CD","CA","NA","K","CS","RB","SR","BA"
@@ -52,6 +53,8 @@ def build_parser():
     p2.add_argument("--skip-npt", action="store_true")
     p2.add_argument("--skip-nvt", action="store_true")
     p2.add_argument("--implicit", action="store_true")
+    p2.add_argument("--gentle", action="store_true")
+
 
 
     # =========================================================
@@ -63,10 +66,42 @@ def build_parser():
     p3.add_argument("--charge", type=int, required=True)
     p3.add_argument("--mult", type=int, required=True)
     p3.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
-    p3.add_argument("--method", default="GFN1")
+    p3.add_argument("--actradius", type=int, default=0)
+    p3.add_argument("--interface", default="xtb")
     p3.add_argument("--temp", type=float, default=300)
     p3.add_argument("--timestep", type=float, default=0.001)
     p3.add_argument("--time", type=float, default=10)
+
+
+    # =========================================================
+    # NEB
+    # =========================================================
+    p4 = subparsers.add_parser("neb", help="Nudged elastic band simulation")
+
+    p4.add_argument("input", help="Input PDB file")
+    p4.add_argument("--trajectory", help="DCD file")
+    p4.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
+
+
+    # =========================================================
+    # POSTPROCESS
+    # =========================================================
+    p5 = subparsers.add_parser("postprocess", help="Analyse trajectory")
+
+    p5.add_argument("input", help="Input PDB file")
+    p5.add_argument("--trajectory", help="DCD file")
+    p5.add_argument("--cutoff", type=float, default=2.6)
+    p5.add_argument("--cores", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
+    p5.add_argument("--metals", nargs="+", default=["ZN"])
+    p5.add_argument("--spring_constant", type=int, default=5)
+    p5.add_argument("--iterations", type=int, default=200)
+    p5.add_argument("--occupancy", type=float, default=0.1)
+    p5.add_argument("--redraw", action="store_true")
+
+
+
+
+
 
     return parser
 
@@ -86,6 +121,9 @@ def main():
 
     elif args.command == "qmmm":
         result = qmmm.run(args)
+    
+    elif args.command == "postprocess":
+        result = postprocess.run(args)
 
     else:
         parser.error("Unknown command")
