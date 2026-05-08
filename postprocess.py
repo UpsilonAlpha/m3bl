@@ -2,6 +2,8 @@ import MDAnalysis as mda
 from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
 from MDAnalysis.analysis.rms import RMSF
 from MDAnalysis.analysis import align
+from MDAnalysis.coordinates.DCD import DCDWriter
+
 
 import numpy as np
 import networkx as nx
@@ -10,7 +12,8 @@ import polars as pl
 import matplotlib.pyplot as plt
 import os
 from pathlib import Path
-
+from ash import *
+import mdtraj
 
 from preprocess import (
     save_result,
@@ -64,13 +67,94 @@ def resolve_overlaps(pos, min_dist=0.08, max_iter=100):
 
 def run(args):
 
-    md = load_section(args.input, "md")
-    pdbfile = md["results"]["lastframe"]
-    trajectory = md["results"]["trajfile"]
+    result: Dict[str, Any] = {}
+
+    if args.qmmm:
+        qmmm = load_section(args.input, "qmmm")
+        md = load_section(args.input, "md")
+
+        pdbfile = md["results"]["lastframe"]
+        trajectory = qmmm["results"]["trajfile"]
+        optimization = qmmm["results"]["xyztraj"]
+
+        u = mda.Universe(pdbfile, optimization)
+
+        # 2. Setup the DCD writer
+        output_dcd = 'output.dcd'
+        with DCDWriter(output_dcd, u.atoms.n_atoms) as W:
+            # 3. Iterate through frames and write to DCD
+            for frame in u.trajectory:
+                W.write(u)
+
+    else:
+        md = load_section(args.input, "md")
+        pdbfile = md["results"]["lastframe"]
+        trajectory = md["results"]["trajfile"]
+        csv = md["results"]["csv"]
+
+        df = pl.read_csv(csv)
+
+        steps = df['#"Step"']
+        time = df['Time (ps)']
+        temperature = df['Temperature (K)']
+
+        #Creating data list
+        data_list=[temperature]
+        #Density and Volume only present for NPT
+        try:
+            density = df['Density (g/mL)']
+            data_list.append(density)
+            volume = df['Box Volume (nm^3)']
+            data_list.append(volume)
+        except:
+            pass
+
+        #Looping over data_list and plot
+        for pd_col in data_list:
+            np_array = pd_col.to_numpy()
+            label=pd_col.name
+            label_no_unit = label.split('(')[0].replace(' ','')
+            print(label_no_unit)
+            eplot = ASH_plot(label, num_subplots=1, x_axislabel="Steps", y_axislabel=label)
+            eplot.addseries(0, x_list=steps.to_numpy(), y_list=np_array, label=label, color='blue', line=True, scatter=True)
+            eplot.savefig(label_no_unit)
+    
+
+
+    #Loading using mdtraj
+    system = mdtraj.load(pdbfile)
+    traj = mdtraj.load(trajectory, top=system)
+
+    print(f"This trajectory contains {traj.n_frames} frames")
+
+    #Calculating full RMSD (flawed) w.r.t. first frame
+    rmsd_all= mdtraj.rmsd(traj, traj[0], 0)
+
+    #Sub-system selection: Defining heavy atoms
+
+    #Selection: All non-H atoms (also flawed because of solvent)
+    heavy_atoms = [atom.index for atom in traj.topology.atoms if atom.element.symbol != 'H']
+
+    #Selection: All non-H atoms in protein
+    heavy_protein_atoms = traj.topology.select("protein and (element !=  H)")
+
+    #RMSD for heavy protein atoms  w.r.t. first frame
+    rmsd_heavy_protein = mdtraj.rmsd(traj, traj[0], 0, atom_indices=heavy_protein_atoms)
+
+    #Plotting using ASH-plot (matplotlib)
+    x_label="Frames in trajectory"
+    y_label="RMSD (nm)"
+    filelabel="RMSD"
+    eplot = ASH_plot(filelabel, num_subplots=1, x_axislabel=x_label, y_axislabel=y_label)
+    eplot.addseries(0, x_list=traj.time, y_list=rmsd_heavy_protein, label=y_label, color='blue', line=True, scatter=True)
+    eplot.savefig(filelabel)
+
+
 
     if args.redraw == False:
         # Load system
         u = mda.Universe(pdbfile, trajectory)
+
         protein = u.select_atoms("protein")
 
         # Define atom groups
@@ -341,7 +425,7 @@ def run(args):
 
     colors = [d["color"] for _, _, d in G.edges(data=True)]
     edge_widths = [2 * d["occupancy"] for _,_,d in G.edges(data=True)]
-    nx.draw(G, pos, node_color=node_colors, node_size=node_sizes, edgecolors="black", edge_color=colors, labels=labels, font_weight="bold", font_size=3, width=edge_widths)
+    nx.draw(G, pos, node_color=node_colors, node_size=node_sizes, edgecolors="white", edge_color=colors, labels=labels, font_weight="bold", font_size=3, width=edge_widths)
     plt.savefig("interaction_network.png", dpi=500)
     plt.close()
 

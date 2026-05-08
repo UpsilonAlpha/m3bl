@@ -6,7 +6,7 @@ Protein/Ligand preprocessing utilities (pipeline-ready).
 from __future__ import annotations
 
 import argparse
-import json
+import yaml
 import os
 import shutil
 from typing import Dict, Any
@@ -29,8 +29,8 @@ from ash import (
 # Constants
 # ==============================
 
-#RESIDUE_VARIANTS = {"A": {80: "HIE"}}
-RESIDUE_VARIANTS = {}
+RESIDUE_VARIANTS = {"A": {80: "HIE"}}
+#RESIDUE_VARIANTS = {}
 
 
 METALS = {
@@ -61,19 +61,18 @@ DONOR_ATOMS = {
 # Utility
 # ==============================
 
-
 def save_result(
     result: Dict[str, Any],
     args,
-    filename: str = "results.json",
+    filename: str = "results.yaml",
     section: str = None,
 ) -> str:
     """
-    Clean, merge, and save results into a shared JSON file.
+    Clean, merge, and save results into a shared YAML file.
 
     - Removes non-serializable objects
     - Stores inputs + metadata
-    - Merges into existing JSON (no overwrite)
+    - Merges into existing YAML (no overwrite)
     - Supports sectioned pipeline output (preprocess/md/qmmm)
 
     Parameters
@@ -83,30 +82,39 @@ def save_result(
     args : argparse.Namespace
         CLI arguments
     filename : str
-        JSON file path
+        YAML file path
     section : str
         Section name (e.g. "preprocess", "md", "qmmm")
 
     Returns
     -------
     str
-        Path to JSON file
+        Path to YAML file
     """
 
     path = Path(filename)
 
     # ==============================
-    # 1. Clean result (JSON-safe)
+    # 1. Clean result (YAML-safe)
     # ==============================
     clean_result = {}
 
     for k, v in result.items():
+
+        # primitive types
         if isinstance(v, (str, int, float, bool)) or v is None:
             clean_result[k] = v
+
+        # containers
         elif isinstance(v, (list, dict)):
             clean_result[k] = v
+
+        # sets -> lists
+        elif isinstance(v, set):
+            clean_result[k] = sorted(v)
+
+        # skip non-serializable objects
         else:
-            # Skip non-serializable objects (Fragment, OpenMMTheory, etc.)
             continue
 
     # ==============================
@@ -114,6 +122,7 @@ def save_result(
     # ==============================
     args_dict = vars(args).copy()
 
+    # normalize metals
     if "metals" in args_dict and args_dict["metals"] is not None:
         args_dict["metals"] = [m.upper() for m in args_dict["metals"]]
 
@@ -131,13 +140,13 @@ def save_result(
     }
 
     # ==============================
-    # 4. Load existing JSON
+    # 4. Load existing YAML
     # ==============================
     if path.exists():
         try:
             with open(path, "r") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError:
             data = {}
     else:
         data = {}
@@ -154,10 +163,17 @@ def save_result(
     # ==============================
     # 6. Atomic write
     # ==============================
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     tmp_path = path.with_suffix(".tmp")
 
     with open(tmp_path, "w") as f:
-        json.dump(data, f, indent=2)
+        yaml.safe_dump(
+            data,
+            f,
+            sort_keys=False,
+            default_flow_style=False,
+        )
 
     tmp_path.replace(path)
 
@@ -166,9 +182,26 @@ def save_result(
 
 
 def load_section(filename: str, section: str) -> Dict[str, Any]:
+    """
+    Load a section from a YAML results file.
+
+    Parameters
+    ----------
+    filename : str
+        YAML file path
+    section : str
+        Section to load
+
+    Returns
+    -------
+    dict
+    """
+
     with open(filename, "r") as f:
-        data = json.load(f)
+        data = yaml.safe_load(f) or {}
+
     return data.get(section, {})
+
 
 # ==============================
 # Ligand Preparation
@@ -320,7 +353,11 @@ def find_coordinators(
 
 
 def run(args) -> Dict[str, Any]:
+
+
     result: Dict[str, Any] = {}
+
+
 
     metals = {m.upper() for m in args.metals}
 

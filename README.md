@@ -1,4 +1,4 @@
-# **Project Documentation: Molecular Simulation Workflows**
+# **mcube documentation**
 
 This project provides a set of Python workflows for **protein-ligand preparation, solvation, bond constraint detection, and molecular dynamics simulations**, including **QM/MM workflows using xTB**. All scripts are designed with **argparse CLI** interfaces and **modular functions** for interoperability.
 

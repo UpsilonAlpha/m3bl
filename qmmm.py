@@ -44,6 +44,7 @@ DEFAULT_FORCEFIELDS = [
     "amber14/protein.ff14SB.xml",
     "amber14/tip3p.xml",
     #"openff_LIG.xml",
+    "hydroxide.xml"
 ]
 
 # ==============================
@@ -122,19 +123,20 @@ def run(args) -> Dict[str, Any]:
     result["qm_atoms"] = qm_atoms
     result["boundary_excluded"] = boundary_excluded
 
-    if args.interface == "xtb":
-        print("[STEP] Initializing QM/MM...")
-        xtb = xTBTheory(xtbmethod="GFN1", numcores=args.cores)
-        qmmm = QMMMTheory(
-            qm_theory=xtb,
-            mm_theory=mm,
-            fragment=fragment,
-            qmatoms=qm_atoms,
-            excludeboundaryatomlist=boundary_excluded,
-            embedding="electrostatic",
-            printlevel=1,
-        )
+    xtb = xTBTheory(xtbmethod="GFN2", numcores=args.cores)
 
+    qmmm = QMMMTheory(
+        qm_theory=xtb,
+        mm_theory=mm,
+        fragment=fragment,
+        qmatoms=qm_atoms,
+        excludeboundaryatomlist=boundary_excluded,
+        embedding="electrostatic",
+        printlevel=1,
+    )
+
+
+    if not args.skip_equilibrate:
         print("[STEP] Running QM/MM MD...")
         OpenMM_MD(
             fragment=fragment,
@@ -152,20 +154,8 @@ def run(args) -> Dict[str, Any]:
 
         result["trajfile"] = Path("QM_MM.dcd").resolve().as_posix()
         result["lastframe"] = Path("QM_MM_lastframe.pdb").resolve().as_posix()
-        save_results(result, args, filename="../results.json", section="qmmm")
 
-    if args.interface == "pyscf":
-        pyscf = PySCFTheory(scf_type="RKS", functional="wb97x-v", basis="def2-svp", solvation="ddCOSMO", solvation_eps=78)
-
-        qmmm = QMMMTheory(
-            qm_theory=pyscf,
-            mm_theory=mm,
-            fragment=fragment,
-            qmatoms=qm_atoms,
-            excludeboundaryatomlist=boundary_excluded,
-            embedding="electrostatic",
-            printlevel=1,
-        )
+    if not args.skip_optimize:
 
         if args.actradius != 0:
             actregiondefine(mmtheory=mm, fragment=fragment, radius=args.actradius, originatom=boundary_excluded[0])
@@ -173,12 +163,19 @@ def run(args) -> Dict[str, Any]:
         else:
             actatoms=qm_atoms
 
-
         waterconlist = getwaterconstraintslist(openmmtheoryobject=mm, atomlist=actatoms, watermodel='tip3p')
         waterconstraints = {'bond': waterconlist}
 
 
+        print("[STEP] Running QM/MM Optimisation...")
         Optimizer(fragment=fragment, theory=qmmm, ActiveRegion=True, actatoms=actatoms, maxiter=200,
             constraints=waterconstraints, charge=args.charge, mult=args.mult)
 
+        pyscf = PySCFTheory(scf_type="RKS", functional="wb97x-v", basis="def2-svp", solvation="ddCOSMO", solvation_eps=78)
+        qm_region = Fragment(xyzfile="geometric_OPTtraj_optim.xyz")
+        Singlepoint(theory=pyscf, fragment=fragment)
+        pyscf.cubegen_density()
+
+
+    save_results(result, args, filename="../results.json", section="qmmm")
     return result

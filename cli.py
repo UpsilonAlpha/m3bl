@@ -71,6 +71,11 @@ def build_parser():
     p3.add_argument("--temp", type=float, default=300)
     p3.add_argument("--timestep", type=float, default=0.001)
     p3.add_argument("--time", type=float, default=10)
+    p3.add_argument("--skip-equilibrate", action="store_true")
+    p3.add_argument("--skip-optimize", action="store_true")
+
+
+
 
 
     # =========================================================
@@ -97,6 +102,8 @@ def build_parser():
     p5.add_argument("--iterations", type=int, default=200)
     p5.add_argument("--occupancy", type=float, default=0.1)
     p5.add_argument("--redraw", action="store_true")
+    p5.add_argument("--qmmm", action="store_true")
+
 
 
 

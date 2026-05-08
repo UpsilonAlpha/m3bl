@@ -139,6 +139,7 @@ def run(args) -> Dict[str, Any]:
 
         result["trajfile"] = Path("NVTtrajectory.dcd").resolve().as_posix()
         result["lastframe"] = Path("NVTtrajectory_lastframe.pdb").resolve().as_posix()
+        result["csv"] = Path("nvtsim.csv").resolve().as_posix()
 
     print("[DONE] Workflow complete")
     save_result(result, args,  filename="../results.json", section="md")
